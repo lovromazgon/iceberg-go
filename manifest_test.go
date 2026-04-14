@@ -775,7 +775,7 @@ func (m *ManifestTestSuite) TestReadManifestListV3() {
 // writeManifestListNoFormatVersion writes a valid v2 manifest list Avro file that
 // omits the "format-version" metadata key, simulating a file produced by a
 // non-Java Iceberg implementation that strictly follows the spec.
-func writeManifestListNoFormatVersion(t *testing.T, version int) bytes.Buffer {
+func writeManifestListNoFormatVersion(t *testing.T, version int, files ...ManifestFile) bytes.Buffer {
 	t.Helper()
 
 	fileSchema, err := internal.NewManifestFileSchema(version)
@@ -795,6 +795,21 @@ func writeManifestListNoFormatVersion(t *testing.T, version int) bytes.Buffer {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	for _, f := range files {
+		if version == 1 {
+			var tmp manifestFileV1
+			f.(*manifestFile).toV1(&tmp)
+			if err := enc.Encode(&tmp); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if err := enc.Encode(f); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
 	if err := enc.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -805,9 +820,47 @@ func writeManifestListNoFormatVersion(t *testing.T, version int) bytes.Buffer {
 func (m *ManifestTestSuite) TestReadManifestListMissingFormatVersion() {
 	// A manifest list without "format-version" should succeed, defaulting to v1.
 	buf := writeManifestListNoFormatVersion(m.T(), 1)
-	files, err := ReadManifestList(&buf)
+	files, err := ReadManifestList(bytes.NewReader(buf.Bytes()))
 	m.NoError(err)
 	m.Empty(files) // the file has no entries, just headers
+
+	// ReadManifestListWithDefaultVersion should also succeed.
+	files, err = ReadManifestListWithDefaultVersion(bytes.NewReader(buf.Bytes()), 1)
+	m.NoError(err)
+	m.Empty(files)
+}
+
+func (m *ManifestTestSuite) TestReadManifestListWithDefaultVersionRoundTrip() {
+	// Write a v2 manifest list with WriteManifestList (includes format-version).
+	var buf bytes.Buffer
+	seqNum := int64(3)
+	err := WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, manifestFileRecordsV2)
+	m.Require().NoError(err)
+	written := buf.Bytes()
+
+	// ReadManifestList should succeed (format-version is present).
+	list, err := ReadManifestList(bytes.NewReader(written))
+	m.Require().NoError(err)
+	m.Len(list, 1)
+	m.Equal(2, list[0].Version())
+
+	// ReadManifestListWithDefaultVersion should also succeed; the header
+	// takes precedence over the default.
+	list, err = ReadManifestListWithDefaultVersion(bytes.NewReader(written), 2)
+	m.Require().NoError(err)
+	m.Len(list, 1)
+	m.Equal(2, list[0].Version())
+
+	// Write a v2 manifest list WITHOUT format-version but WITH entries.
+	noVer := writeManifestListNoFormatVersion(m.T(), 2, manifestFileRecordsV2...)
+
+	// ReadManifestListWithDefaultVersion with default=2 should decode entries
+	// with version 2.
+	list, err = ReadManifestListWithDefaultVersion(bytes.NewReader(noVer.Bytes()), 2)
+	m.Require().NoError(err)
+	m.Require().Len(list, 1)
+	m.Equal(2, list[0].Version())
+	m.Equal(manifestFileRecordsV2[0].FilePath(), list[0].FilePath())
 }
 
 // writeManifestNoFormatVersion writes a valid v1 manifest entry Avro file that

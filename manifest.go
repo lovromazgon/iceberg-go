@@ -814,10 +814,23 @@ func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestE
 // ReadManifestList reads in an avro manifest list file and returns a slice
 // of manifest files or an error if one is encountered.
 //
-// Per the Iceberg spec, manifest list files are not required to carry a
-// "format-version" metadata key (only manifest files are). When the key is
-// absent, version 1 is assumed.
+// If the Avro file metadata does not contain a "format-version" key,
+// version 1 is assumed (the Iceberg spec does not mandate this header
+// for manifest list files).
 func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
+	return ReadManifestListWithDefaultVersion(in, 1)
+}
+
+// ReadManifestListWithDefaultVersion reads a manifest list from the given
+// reader. If the Avro file metadata does not contain a "format-version"
+// header, defaultVersion is used instead. This is useful for reading
+// manifest list files written by implementations that do not include
+// format-version in the Avro metadata (which is spec-compliant since
+// the spec only mandates this header for manifest files, not manifest
+// list files).
+//
+// When defaultVersion is 0 and the header is absent, an error is returned.
+func ReadManifestListWithDefaultVersion(in io.Reader, defaultVersion int) ([]ManifestFile, error) {
 	dec, err := ocf.NewDecoder(in, ocf.WithDecoderSchemaCache(&avro.SchemaCache{}))
 	if err != nil {
 		return nil, err
@@ -828,12 +841,16 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 		return nil, err
 	}
 
-	version := 1
+	var version int
 	if raw := dec.Metadata()["format-version"]; len(raw) > 0 {
 		version, err = strconv.Atoi(string(raw))
 		if err != nil {
 			return nil, fmt.Errorf("invalid format-version: %w", err)
 		}
+	} else if defaultVersion > 0 {
+		version = defaultVersion
+	} else {
+		return nil, errors.New("missing format-version in manifest list metadata")
 	}
 
 	if version == 1 {
